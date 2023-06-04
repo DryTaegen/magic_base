@@ -1,114 +1,148 @@
 import sqlite3 as sq
 import datetime as dt
 from PIL import Image
+import requests
+from io import BytesIO
+import pymongo
+from mtgsdk import Card
+from mtgsdk import Set
+from mtgsdk import Type
+from mtgsdk import Supertype
+from mtgsdk import Subtype
+from mtgsdk import Changelog
 
-def connect_database(database_name):
+def connect_database(database_name, host):
     #Wil open a session with the database.
-    db = sq.connect(database_name)
-    print(f"Connected to server. sqlite version: {sq.version}")
+    client = pymongo.MongoClient(host)
+    db = client[database_name]
+    print(f"Connected to server.")
     return db
 
-def disconnect_database(database):
-    #Will ask if the user wishes to save changes before quitting
-    cont = True
-    while cont:
-        inp = input("Do you wish to save your changes? [Y,N] ")
-        if inp.upper() == "Y":
-            database.commit()
-            cont = False
-        elif inp.upper() == "N":
-            cont = False
-        else:
-            print(f"Sorry, {inp} was not recognized.")
-    database.close()
 
-def add_card(database, card_name, card_image, date_time):
-    #Will take the two required parameters for a card and add them to the card table.'
-    values = (card_name, card_image, 0, date_time)
-    statement = '''INSERT INTO card(card_name, card_image, num_of_uses, last_update)
-                    VALUES(?,?,?,?)'''
-    cursor = database.cursor()
-    cursor.execute(statement, values)
+def add_card(database, card_name, date_time):
+    card_list = Card.where(name = card_name).all()
+    
+    print(f"Type the number corresponding to the version of {card_name} you want: ")
+    i = 0
+    for c in card_list:
+        print(f"{i}: {c.name}: set: {c.set}")
+        i += 1
+    count = int(input("> "))
+    card = card_list[count]
+
+    cards = database["cards"]    
+    card_dict = {"name":card.name,"date added":date_time ,"image url":card.image_url ,"uses": 0}
+
+    ins = cards.insert_one(card_dict)
+    
 
 def delete_card(database, card_name):
-    #Will find the card matching the inputted name and remove it from the list.
-    statement = '''DELETE FROM card WHERE card_name=?'''
-    cursor = database.cursor()
-    cursor.execute(statement, (card_name,))
-    statement = '''DELETE FROM deck_has_card WHERE card_name=?'''
-    cursor = database.cursor()
-    cursor.execute(statement, (card_name,))
+    cards = database["cards"]
+    query = {"name": card_name}
+    cards.delete_one(query)
+
 
 def make_deck(database, deck_name, date_time):
-    #Will take the name of the deck, create a new row in the table, then call, insert_cards 
-    #until the user is satisfied
-    values = (deck_name, date_time)
-    statement = '''INSERT INTO decks(deck_name, last_update)
-                    VALUES(?,?)'''
-    cursor = database.cursor()
-    cursor.execute(statement, values)
+    decks = database["decks"]    
+    deck_dict = {"name":deck_name,"date added":date_time}
+    ins = decks.insert_one(deck_dict)
+
     insert_cards(database, deck_name)
 
 def delete_deck(database, deck_name):
-    #will take the user input and find the deck matching the name and delete it. 
-    cursor = database.cursor()
-    cursor.execute("SELECT deck_id FROM decks WHERE deck_name=?", (deck_name,))
-    deck_id = cursor.fetchone()
-    statement = '''DELETE FROM decks WHERE deck_name=?'''
-    cursor.execute(statement, (deck_name,))
-    statement = '''DELETE FROM deck_has_card WHERE deck_id=?'''
-    cursor = database.cursor()
-    cursor.execute(statement, (deck_id[0],))
+    cards = database["cards"]
+    decks = database["decks"]
+    containers = database["deck_has_cards"]
+    query = {"name": deck_name}
+
+    decks.delete_one(query)
+
+    containers_query = {deck_name: { "$regex": ".*" }}
+    removal = containers.find(containers_query)
+    for card in removal:
+        card_query = {"name": card[deck_name]}
+        card = cards.find(card_query)
+        decrement = card[0]["uses"] - 1
+        decrease = { "$set": {"uses": decrement}}
+        cards.update_one(card_query, decrease)
+
+    containers.delete_many(containers_query)
 
 def insert_cards(database, deck_name):
     #Runs the process of adding cards to the given deck until the user quits.
+    containers = database["deck_has_cards"]
+    decks = database["decks"]
+    cards = database["cards"]
+    deck_query = {"name": deck_name	}
+    
     continue_process = True
     while continue_process:
-        cursor = database.cursor()
-        add_card = input("Type the name of the card you want to add, press 'q' to quit: ")
-        if add_card == 'q':
+        print("Type the name of card that you want to add ('q' to quit) ")
+        query = input("> ")
+        if query.lower() == 'q':
             continue_process = False
-        else:
-            cursor.execute("SELECT * FROM card WHERE card_name=?", (add_card,))
-            card = cursor.fetchone()
-            statement = '''INSERT INTO deck_has_card(deck_id, card_name, last_update)
-                            VALUES(?,?,?)'''
-            cursor.execute("SELECT deck_id FROM decks WHERE deck_name=?", (deck_name,))
-            deck_id = cursor.fetchone()
-            cursor.execute(statement, (deck_id[0], card[0], dt.datetime.now()))
+            continue
+        try:
+            #Add card and deck pairs
+            card_query = {"name": query}
+            card = cards.find(card_query)
+            deck = decks.find(deck_query)
+            contain_pair = {deck[0]["name"]: card[0]["name"]}
+            x = containers.insert_one(contain_pair)
+
+            #increase the use of cards
+            increment = card[0]["uses"] + 1
+            increase = { "$set": {"uses": increment}}
+            cards.update_one(card_query, increase)
+        except:
+            print(f"{query} was not found in the database.")
+            continue
+
+        
+
 
 def remove_cards(database, deck_name):
     #Runs the process of removing cards from the given deck until the user quits.
-    statement = '''DELETE FROM deck_has_card WHERE deck_id=? AND card_name=?'''
-    cursor = database.cursor()
-    cursor.execute("SELECT deck_id FROM decks WHERE deck_name=?",(deck_name,))
-    deck_id = cursor.fetchone()
-    remove_card = input("Type the name of the card you want to remove: ")
-    cursor.execute("SELECT card_name FROM card WHERE card_name=?", (remove_card,))
-    card_name = cursor.fetchone()
-    cursor.execute(statement, (deck_id[0], card_name[0]))
+    containers = database["deck_has_cards"]
+    cards = database["cards"]
+    continue_process = True
+    while continue_process:
+        print("Type the name of card that you want to remove ('q' to quit) ")
+        remove_card = input("> ")
+        if remove_card.lower() == 'q':
+            continue_process = False
+            continue
+        try:
+            query = {deck_name: remove_card}
+
+            containers.delete_one(query)
+
+            card_query = {"name": remove_card}
+            card = cards.find(card_query)
+            decrement = card[0]["uses"] - 1
+            decrease = { "$set": {"uses": decrement}}
+            cards.update_one(card_query, decrease)
+        except:
+            print(f"{remove_card} was not found in {deck_name}")
+        
 
 def get_deck(database, deck_name):
-    #Gets the list of cards in a deck
-    cursor = database.cursor()
-    select = '''SELECT c.card_name FROM card c 
-                INNER JOIN deck_has_card dhc 
-                ON c.card_name = dhc.card_name 
-                INNER JOIN decks d 
-                ON dhc.deck_id = d.deck_id
-                WHERE d.deck_name =?'''
-    cursor.execute(select, (deck_name,))
-    cards = cursor.fetchall()
-    for card in cards:
-        print(card)
+    containers = database["deck_has_cards"]
+    query = {deck_name: { "$regex": ".*" }}
+
+    deck = containers.find(query)
+
+    for c in deck:
+        print(c[deck_name])
 
 def get_card_image(database, card_name):
-    #gets the image of a given card.
-    cursor = database.cursor()
-    cursor.execute("SELECT card_image FROM card WHERE card_name=?", (card_name,))
-    path = cursor.fetchone()
-    image = Image.open(path[0])
-    image.show()
+    cards = database["cards"]
+    query = {"name": card_name}
+    card = cards.find(query)
+    url = card[0]["image url"]
+    response = requests.get(url, verify=False)
+    img= Image.open(BytesIO(response.content))
+    img.show()
 
 def main_menu(db):
     cont = True
@@ -141,8 +175,7 @@ def main_menu(db):
 
 def add_card_menu(db):
     name = input("Type the name of the card: ")
-    image = input("Type the path of the image of the card: ")
-    add_card(db, name, image, dt.datetime.now())
+    add_card(db, name, dt.datetime.now())
 
 def delete_card_menu(db):
     name = input("Type the name of the card you want removed: ")
@@ -165,11 +198,11 @@ def remove_cards_menu(db):
 
 
 def main():
-    database = "database\magicBase.db"
+    database_name = "magicbase"
+    host = "mongodb://localhost:27017"
 
-    db = connect_database(database)
+    db = connect_database(database_name, host)
     main_menu(db)
-    disconnect_database(db)
 
 
 main()
